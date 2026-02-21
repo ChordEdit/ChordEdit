@@ -5,7 +5,7 @@
     <span style="color: #666; font-size: 0.9em;"><sup>1</sup> Guangdong University of Technology, <sup>2</sup> Huizhou University, <sup>3</sup> Shenzhen University, <sup>4</sup> Peking University <br> <sup>†</sup> Corresponding author</span>
   </div>
 
-  <a href="https://rlstg.github.io"><img src="https://img.shields.io/badge/Project-Page-2b7de9"></a>
+  <a href="https://chordedit.github.io"><img src="https://img.shields.io/badge/Project-Page-2b7de9"></a>
   <a href="https://arxiv.org/abs/2601.14115"><img src="https://img.shields.io/badge/arXiv-2601.14115-b31b1b.svg"></a>
 
   <img src="chord_show.gif" alt="ChordEdit demo" width="100%" />
