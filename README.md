@@ -63,13 +63,5 @@ https://github.com/cure-lab/PnPInversion
 # Citation
 If you find our work helpful, please **star 🌟** this repo and **cite 📑** our paper. Thanks for your support!
 ```
-@misc{lu2026rlstg(placehold),
-  title={Riemannian Liquid Spatio-Temporal Graph Network},
-  author={Liangsi Lu and Jingchao Wang and Zhaorong Dai and Hanqian Liu and Yang Shi},
-  year={2026},
-  eprint={2601.14115},
-  archivePrefix={arXiv},
-  primaryClass={cs.LG},
-  url={https://arxiv.org/abs/2601.14115},
-}
+coming soon
 ```
