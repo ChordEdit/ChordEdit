@@ -6,7 +6,7 @@
   </div>
 
   <a href="https://chordedit.github.io"><img src="https://img.shields.io/badge/Project-Page-2b7de9"></a>
-  <a href="https://arxiv.org/abs/2601.14115"><img src="https://img.shields.io/badge/arXiv-2601.14115-b31b1b.svg"></a>
+  <a href="https://arxiv.org/pdf/2602.19083"><img src="https://img.shields.io/badge/arXiv-2602.19083-b31b1b.svg"></a>
 
   <img src="chord_show.gif" alt="ChordEdit demo" width="100%" />
 </div>
@@ -63,5 +63,13 @@ https://github.com/cure-lab/PnPInversion
 # Citation
 If you find our work helpful, please **star 🌟** this repo and **cite 📑** our paper. Thanks for your support!
 ```
-coming soon
+@misc{lu2026chordedit,
+      title={ChordEdit: One-Step Low-Energy Transport for Image Editing}, 
+      author={Liangsi Lu and Xuhang Chen and Minzhe Guo and Shichu Li and Jingchao Wang and Yang Shi},
+      year={2026},
+      eprint={2602.19083},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2602.19083}, 
+}
 ```
