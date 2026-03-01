@@ -1,7 +1,7 @@
 <div align="center">
   <h1>[CVPR 2026] ChordEdit: One-Step Low-Energy Transport for Image Editing</h1>
   <div class="authors">
-    <span><a href="https://luliangsi.github.io">Liangsi Lu</a><sup>1</sup>, <a href="#">Xuhang Chen</a><sup>2</sup>, <a href="#">Minzhe Guo</a><sup>1</sup>, <a href="#">Shichu Li</a><sup>3</sup>, <a href="#">Jingchao Wang</a><sup>4</sup>, <a href="https://cnshiyang.github.io">Yang Shi</a><sup>1†</sup></span><br>
+    <span><a href="https://luliangsi.github.io">Liangsi Lu</a><sup>1</sup>, <a href="https://cxh.netlify.app/">Xuhang Chen</a><sup>2</sup>, <a href="#">Minzhe Guo</a><sup>1</sup>, <a href="#">Shichu Li</a><sup>3</sup>, <a href="#">Jingchao Wang</a><sup>4</sup>, <a href="https://cnshiyang.github.io">Yang Shi</a><sup>1†</sup></span><br>
     <span style="color: #666; font-size: 0.9em;"><sup>1</sup> Guangdong University of Technology, <sup>2</sup> Huizhou University, <sup>3</sup> Shenzhen University, <sup>4</sup> Peking University <br> <sup>†</sup> Corresponding author</span>
   </div>
 
