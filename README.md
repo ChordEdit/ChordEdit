@@ -63,13 +63,10 @@ https://github.com/cure-lab/PnPInversion
 # Citation
 If you find our work helpful, please **star 🌟** this repo and **cite 📑** our paper. Thanks for your support!
 ```
-@misc{lu2026chordedit,
-      title={ChordEdit: One-Step Low-Energy Transport for Image Editing}, 
-      author={Liangsi Lu and Xuhang Chen and Minzhe Guo and Shichu Li and Jingchao Wang and Yang Shi},
-      year={2026},
-      eprint={2602.19083},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2602.19083}, 
+@article{lu2026chordedit,
+  title={ChordEdit: One-Step Low-Energy Transport for Image Editing},
+  author={Lu, Liangsi and Chen, Xuhang and Guo, Minzhe and Li, Shichu and Wang, Jingchao and Shi, Yang},
+  journal={arXiv preprint arXiv:2602.19083},
+  year={2026}
 }
 ```
