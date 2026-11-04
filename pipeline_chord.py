@@ -14,7 +14,7 @@ from diffusers.utils import BaseOutput
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from transformers import AutoTokenizer, CLIPImageProcessor, CLIPTextModel
-
+import torch.nn.functional as F
 DEFAULT_SEED = 42
 DEFAULT_COMPUTE_DTYPE = torch.float32
 DEFAULT_SAFETY_CHECKER_ID = "CompVis/stable-diffusion-safety-checker"
@@ -31,6 +31,8 @@ LOGGER = logging.getLogger(__name__)
 class ChordEditPipelineOutput(BaseOutput):
     images: List[Image.Image] | torch.Tensor
     latents: torch.Tensor
+    masks: Optional[torch.Tensor] = None  # ← 新增，仅 return_mask=True 时非 None
+
 
 
 class _CenterSquareCropTransform:
@@ -193,6 +195,7 @@ class ChordEditPipeline(DiffusionPipeline):
         edit_config: Optional[Dict[str, Any]] = None,
         seed: Optional[int] = None,
         output_type: str = "pil",
+        return_mask: bool = False,
     ) -> ChordEditPipelineOutput:
         """Run ChordEdit once on a single image."""
 
@@ -221,7 +224,7 @@ class ChordEditPipeline(DiffusionPipeline):
             num_noises=edit_params["noise_samples"],
         )
 
-        x0_pred = self._run_edit(
+        x0_pred, final_mask = self._run_edit(
             x_src=latents,
             src_embed=src_embed,
             edit_embed=tgt_embed,
@@ -241,6 +244,7 @@ class ChordEditPipeline(DiffusionPipeline):
         return ChordEditPipelineOutput(
             images=images,
             latents=latents_tensor,
+            masks=final_mask.detach().cpu() if (return_mask and final_mask is not None) else None,
         )
 
     def encode_prompt(self, prompts: Sequence[str]) -> torch.Tensor:
@@ -374,6 +378,14 @@ class ChordEditPipeline(DiffusionPipeline):
         params["n_steps"] = int(max(1, params["n_steps"]))
         params["t_start"] = float(max(0.0, min(1.0, params["t_start"])))
         params["t_end"] = float(max(0.0, min(params["t_start"], params["t_end"])))
+        # ---- 时间自适应（能量驱动 δ）----
+        params["use_adaptive_delta"] = bool(params.get("use_adaptive_delta", False))
+        params["adaptive_alpha"] = float(
+            max(0.0, min(1.0, float(params.get("adaptive_alpha", 1.0))))
+        )
+        params["adaptive_floor"] = float(
+            max(0.0, min(1.0, float(params.get("adaptive_floor", 0.2))))
+        )
         t_delta = float(max(0.0, min(1.0, params["t_delta"])))
         if t_delta >= params["t_start"]:
             safe_max = max(1, self._max_unet_timestep)
@@ -381,6 +393,18 @@ class ChordEditPipeline(DiffusionPipeline):
         params["t_delta"] = t_delta
         params["step_scale"] = float(params["step_scale"])
         params["cleanup"] = bool(params.get("cleanup", False))
+        # ---- 新增：局部 Chord 参数 ----
+        params["use_local_chord"] = bool(params.get("use_local_chord", False))
+        mode = str(params.get("local_mode", "B")).upper()
+        params["local_mode"] = mode if mode in ("A", "B") else "B"
+        params["local_beta"] = float(
+            max(0.0, min(1.0, float(params.get("local_beta", 0.2))))
+        )
+        tau_lo = float(max(0.0, float(params.get("mask_tau_low", 0.1))))
+        tau_hi = float(max(tau_lo + 1e-3, float(params.get("mask_tau_high", 0.4))))
+        params["mask_tau_low"] = tau_lo
+        params["mask_tau_high"] = tau_hi
+        params["mask_sigma"] = float(max(0.0, float(params.get("mask_sigma", 2.0))))
         return params
 
     def _prepare_noise_list(
@@ -397,6 +421,61 @@ class ChordEditPipeline(DiffusionPipeline):
             for _ in range(num_noises)
         ]
         return noise_list
+
+    def _gaussian_blur(self, mask: torch.Tensor, sigma: float) -> torch.Tensor:
+        """Separable-free 2D Gaussian blur on a (B, 1, H, W) mask."""
+        if sigma <= 0:
+            return mask
+        import torch.nn.functional as F
+
+        radius = max(1, int(round(2.5 * sigma)))  # 覆盖 ±2.5σ
+        kernel_size = 2 * radius + 1
+        coords = torch.arange(kernel_size, device=mask.device, dtype=torch.float32) - radius
+        g = torch.exp(-(coords ** 2) / (2.0 * sigma * sigma))
+        g = g / g.sum()
+        kernel2d = (g[:, None] * g[None, :]).to(dtype=mask.dtype)
+        channels = mask.shape[1]
+        kernel2d = kernel2d.expand(channels, 1, kernel_size, kernel_size).contiguous()
+        return F.conv2d(mask, kernel2d, padding=radius, groups=channels)
+
+    def _energy_mask(
+            self,
+            u_hat: torch.Tensor,
+            tau_low: float = 0.1,
+            tau_high: float = 0.4,
+            sigma: float = 2.0,
+            gamma: float = 0.5,  # ← 新增：mask 增益（<1 抬高 M）
+            dilate: int = 2,  # ← 新增：最大池化膨胀核半径
+            quantile: float = 0.95,  # ← 新增：归一化分位（0.99 → 0.95）
+    ) -> torch.Tensor:
+        """Derive a soft spatial mask from the control-field energy map.
+
+        u_hat: (B, C, H, W) — 单步编辑方向
+        返回:  (B, 1, H, W) ∈ [0, 1]
+        """
+        B = u_hat.shape[0]
+        energy = (u_hat ** 2).sum(dim=1, keepdim=True)  # (B,1,H,W)
+        flat = energy.reshape(B, -1).float()  # quantile 需 float32
+        if flat.shape[1] >= 2:
+            scale = torch.quantile(flat, 0.99, dim=1)
+        else:
+            scale = flat.max(dim=1).values
+        scale = scale.clamp_min(1e-8).view(B, 1, 1, 1).to(dtype=u_hat.dtype)
+        e_norm = energy / scale
+        denom = max(tau_high - tau_low, 1e-6)
+        mask = torch.clamp((e_norm - tau_low) / denom, 0.0, 1.0)
+        # ① 膨胀：把强编辑点的邻域也纳入（M>0 的区域向外扩 dilate 像素）
+        if dilate > 0:
+            mask = F.max_pool2d(mask, kernel_size=2 * dilate + 1, stride=1, padding=dilate)
+
+        # ② gamma 增益：M ← M^γ，γ<1 时中低值被显著抬高
+        if gamma != 1.0:
+            mask = mask.clamp_min(1e-8) ** gamma
+
+        # ③ 高斯羽化（接缝 + 理论需要）
+        mask = self._gaussian_blur(mask, sigma=sigma)
+        return mask
+
 
     def _time_to_index(self, batch: int, t_scalar: float, device, dtype=torch.long):
         idx = round(self._max_unet_timestep * float(t_scalar))
@@ -425,7 +504,7 @@ class ChordEditPipeline(DiffusionPipeline):
         x0_pred = (z_t - sigma_t * noise_pred) / alpha_t
         return x0_pred
 
-    def _u_estimate(self, x_anchor, src_embed, edit_embed, noise, t_s: float, delta: float):
+    def _u_estimate(self, x_anchor, src_embed, edit_embed, noise, t_s: float, delta: float,adaptive_cfg ):
         batch, device = x_anchor.shape[0], x_anchor.device
         t_idx_s = self._time_to_index(batch, t_s, device=device)
         t_idx_s0 = self._time_to_index(batch, max(0.0, t_s - delta), device=device)
@@ -480,44 +559,106 @@ class ChordEditPipeline(DiffusionPipeline):
         dv_s = (x_tar_p_s - x_src_p_s).sum(dim=0) / float(num_noises)
         dv_s0 = (x_tar_p_s0 - x_src_p_s0).sum(dim=0) / float(num_noises)
 
-        denom = (t_s + delta)
-        if denom <= 1e-6:
-            return dv_s
-        return (delta * dv_s + t_s * dv_s0) / denom
+        if adaptive_cfg is None or not adaptive_cfg.get("enable", False):
+            denom = (t_s + delta)
+            if denom <= 1e-6:
+                return dv_s
+            return (delta * dv_s + t_s * dv_s0) / denom
+
+        # ---- 时间自适应：逐位置有效 δ ----
+        alpha = float(adaptive_cfg.get("alpha", 1.0))
+        floor = float(adaptive_cfg.get("floor", 0.2))
+        eps = torch.finfo(dv_s.dtype).eps
+
+        # 复用 _energy_mask 的归一化：tau_low=0, tau_high=1, sigma=0 时
+        # 返回 clip(E/E_99, 0, 1)，正是所需的 E_norm ∈ [0,1]
+        E_norm = self._energy_mask(
+            dv_s0, tau_low=0.0, tau_high=1.0, sigma=0.0,
+        )  # (B,1,H,W)
+
+        E_mixed = floor + (1.0 - floor) * E_norm  # (B,1,H,W) ∈ [floor, 1]
+        delta_eff = delta * ((1.0 - alpha) + alpha * E_mixed)  # (B,1,H,W) ∈ [δ·(1-α), δ]
+
+        # 防御：确保 δ_eff < t_s（理论上已满足，兜底防浮点误差）
+        max_delta = max(t_s - 1e-6, 0.0)
+        delta_eff = delta_eff.clamp(min=0.0, max=max_delta)
+
+        denom = (t_s + delta_eff).clamp_min(eps)  # (B,1,H,W)
+        return (delta_eff * dv_s + t_s * dv_s0) / denom
 
     def _run_edit(
-        self,
-        x_src: torch.Tensor,
-        src_embed: torch.Tensor,
-        edit_embed: torch.Tensor,
-        noise: List[torch.Tensor],
-        params: Dict[str, Any],
-    ) -> torch.Tensor:
+            self,
+            x_src: torch.Tensor,
+            src_embed: torch.Tensor,
+            edit_embed: torch.Tensor,
+            noise: List[torch.Tensor],
+            params: Dict[str, Any],
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         device = x_src.device
         if params["n_steps"] == 1:
             t_grid = [params["t_start"]]
         else:
             t_grid = torch.linspace(
-                params["t_start"],
-                params["t_end"],
-                steps=params["n_steps"],
-                device=device,
+                params["t_start"], params["t_end"],
+                steps=params["n_steps"], device=device,
             ).tolist()
 
+        use_local = params["use_local_chord"]
+        mode = params["local_mode"]
+        beta = params["local_beta"]
+        tau_lo = params["mask_tau_low"]
+        tau_hi = params["mask_tau_high"]
+        sigma = params["mask_sigma"]
+
         x_curr = x_src
+        last_mask: Optional[torch.Tensor] = None
+        adaptive_cfg = None
+        if params["use_adaptive_delta"]:
+            adaptive_cfg = {
+                "enable": True,
+                "alpha": params["adaptive_alpha"],
+                "floor": params["adaptive_floor"],
+            }
+        adaptive_cfg = None
+        if params["use_adaptive_delta"]:
+            adaptive_cfg = {
+                "enable": True,
+                "alpha": params["adaptive_alpha"],
+                "floor": params["adaptive_floor"],
+            }
         for t_s in t_grid:
             u_hat = self._u_estimate(
-                x_curr,
-                src_embed,
-                edit_embed,
-                noise,
-                float(t_s),
-                params["t_delta"],
+                x_curr, src_embed, edit_embed, noise,
+                float(t_s), params["t_delta"],adaptive_cfg=adaptive_cfg,
+
             )
-            x_curr = x_curr + params["step_scale"] * u_hat
+
+            if use_local:
+                mask = self._energy_mask(u_hat, tau_lo, tau_hi, sigma)  # (B,1,H,W)
+                last_mask = mask
+                if params.get("local_apply_transport", True):
+                    u_local = mask * u_hat + (1.0 - mask) * beta * u_hat
+                    x_curr = x_curr + params["step_scale"] * u_local
+                else:
+                    # 原版 transport，力度完全保留
+                    x_curr = x_curr + params["step_scale"] * u_hat
+            else:
+                x_curr = x_curr + params["step_scale"] * u_hat
 
         if params["cleanup"]:
-            t_end_idx = self._time_to_index(x_src.shape[0], params["t_end"], device=device)
-            x_curr = self._pred_x0(x_curr, t_end_idx, edit_embed, noise[0])
+            t_end_idx = self._time_to_index(
+                x_src.shape[0], params["t_end"], device=device
+            )
+            if use_local and last_mask is not None:
+                if mode == "B":
+                    # 背景锚定 → prox → 后混合
+                    x_pred_reg = last_mask * x_curr + (1.0 - last_mask) * x_src
+                    x_prox = self._pred_x0(x_pred_reg, t_end_idx, edit_embed, noise[0])
+                    x_curr = last_mask * x_prox + (1.0 - last_mask) * x_src
+                else:  # mode == "A"
+                    x_prox = self._pred_x0(x_curr, t_end_idx, edit_embed, noise[0])
+                    x_curr = last_mask * x_prox + (1.0 - last_mask) * x_src
+            else:
+                x_curr = self._pred_x0(x_curr, t_end_idx, edit_embed, noise[0])
 
-        return x_curr
+        return x_curr, last_mask
