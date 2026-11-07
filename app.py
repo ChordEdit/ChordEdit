@@ -46,6 +46,12 @@ DEFAULT_EDIT_CONFIG: Dict[str, Any] = {
     "use_adaptive_delta": False,
     "adaptive_alpha": 1.0,
     "adaptive_floor": 0.2,
+    # ---- 清晰度增强模块 ----
+    "use_sharpen_u": False,
+    "sharpen_gamma": 0.5,
+    "use_latent_sharp": False,
+    "latent_sharp_bg": 0.5,
+    "latent_sharp_fg": 0.2,
 }
 
 DEFAULT_SEED = 42
@@ -254,7 +260,7 @@ def build_demo(
         seed: float, n_samples: float,
         t_start: float, t_end: float, t_delta: float, step_scale: float,
         use_local_chord, local_beta, mask_tau_low, mask_tau_high, mask_sigma,
-        use_adaptive_delta, adaptive_alpha, adaptive_floor,
+        use_adaptive_delta, adaptive_alpha, adaptive_floor,use_sharpen_u, sharpen_gamma, use_latent_sharp, latent_sharp_bg, latent_sharp_fg,
     ):
         _validate_inputs(image, source_prompt, target_prompt, t_start, t_end, t_delta)
 
@@ -275,6 +281,12 @@ def build_demo(
             "use_adaptive_delta": bool(use_adaptive_delta),
             "adaptive_alpha": float(adaptive_alpha),
             "adaptive_floor": float(adaptive_floor),
+            # ---- 清晰度增强模块 ----
+            "use_sharpen_u": bool(use_sharpen_u),
+            "sharpen_gamma": float(sharpen_gamma),
+            "use_latent_sharp": bool(use_latent_sharp),
+            "latent_sharp_bg": float(latent_sharp_bg),
+            "latent_sharp_fg": float(latent_sharp_fg),
         }
 
         try:
@@ -344,6 +356,17 @@ def build_demo(
 | `adaptive_floor` | 背景 δ 更大，更接近原版（更稳） | **`0` 时背景融合几乎全取 `dv_s0`，易抖动** | 0.20–0.40 |
 
 > 提示：mask 面板为空说明当前 `use_local_chord=False`，属正常情况。
+
+#### 🛠 清晰度增强模块（High-Frequency Enhancement）
+
+| 参数 | 原理与效果 | 推荐范围 | 论文解释 |
+|---|---|---|---|
+| **`use_sharpen_u`** | **路线一：控制场锐化**。对提取出的编辑方向 `û` 做反锐化掩蔽。让编辑边界更清晰，不拖泥带水。 | 开启 | 在 Transport 阶段干预能量场，增加高频。 |
+| `sharpen_gamma` | 锐化强度。↑ 边缘更锐，但太高会导致边缘出现光晕（Halos）。 | 0.3 – 0.8 | Unsharp masking 的增益系数。 |
+| **`use_latent_sharp`** | **路线二：潜空间高频回填**。由于 VAE 解码必定丢失高频，该操作在 VAE 解码前，把原图的纹理高频“塞回”背景，同时给前景提锐。 | 开启 | 解决单步编辑和 VAE 重建导致的“发糊”问题。 |
+| `latent_sharp_bg` | 背景清晰度回填力度。↑ 背景树叶/发丝等纹理越清晰（越接近原图）；↓ 背景可能会显得像被磨皮过一样。 | 0.3 – 0.7 | 用原图高频 `hf_src` 修补背景。 |
+| `latent_sharp_fg` | 前景（编辑区）细节强化。↑ 胡子/衣服纹理更锐利；↓ 更柔和。**注意：太高容易导致噪点或过曝。** | 0.1 – 0.3 | 用生成图高频 `hf_curr` 提锐前景。 |
+
                 """
             )
 
@@ -459,7 +482,39 @@ def build_demo(
                             value=float(default_edit_config.get("adaptive_floor", 0.2)),
                             info="0 时背景 δ→0，融合几乎全取 dv_s0，而背景 dv_s0 是噪声 → 易抖动；推荐 0.20–0.40 保留最小噪声端信息。",
                         )
+                # ---------------- 清晰度增强 ----------------
+                use_sharpen_u = gr.Checkbox(
+                    label="1. Sharpen Control Field (u_hat High-Freq)",
+                    value=False,
+                    info="锐化编辑方向场，修复边缘模糊（零 NFE）。",
+                )
+                with gr.Accordion("Control Field Sharpen Parameters", open=False):
+                    sharpen_gamma_input = gr.Slider(
+                        label="sharpen_gamma (边缘锐化强度)",
+                        minimum=0.0, maximum=2.0, step=0.1,
+                        value=float(default_edit_config.get("sharpen_gamma", 0.5)),
+                        info="↑ 边缘更锐利但可能出现伪影；↓ 边缘较平滑。推荐 0.3–0.8。",
+                    )
 
+                use_latent_sharp = gr.Checkbox(
+                    label="2. Latent HF Compensation (Background Clarity)",
+                    value=False,
+                    info="在解码前注入原图高频，修复背景/纹理发糊（零 NFE）。",
+                )
+                with gr.Accordion("Latent HF Compensation Parameters", open=False):
+                    with gr.Row():
+                        latent_sharp_bg_input = gr.Slider(
+                            label="latent_sharp_bg (背景清晰度回填)",
+                            minimum=0.0, maximum=1.0, step=0.05,
+                            value=float(default_edit_config.get("latent_sharp_bg", 0.5)),
+                            info="↑ 背景越接近源图原生清晰度；↓ 背景更平滑（可能会糊）。推荐 0.3–0.7。",
+                        )
+                        latent_sharp_fg_input = gr.Slider(
+                            label="latent_sharp_fg (前景细节强化)",
+                            minimum=0.0, maximum=1.0, step=0.05,
+                            value=float(default_edit_config.get("latent_sharp_fg", 0.2)),
+                            info="↑ 生成的编辑对象细节更锐利；↓ 更柔和。推荐 0.1–0.3，太高容易过曝。",
+                        )
                 run_button = gr.Button("Run Edit", variant="primary")
 
             # ---------------- 右栏：结果 + mask 可视化（Tabs） ----------------
@@ -491,6 +546,8 @@ def build_demo(
             use_local_chord, local_beta_input,
             mask_tau_low_input, mask_tau_high_input, mask_sigma_input,
             use_adaptive_delta, adaptive_alpha_input, adaptive_floor_input,
+            use_sharpen_u, sharpen_gamma_input,
+            use_latent_sharp, latent_sharp_bg_input, latent_sharp_fg_input,
         ]
         run_outputs = [output_image, mask_output, overlay_output]
 
@@ -510,7 +567,16 @@ def build_demo(
             inputs=use_adaptive_delta,
             outputs=[adaptive_alpha_input, adaptive_floor_input],
         )
-
+        use_sharpen_u.change(
+            fn=lambda v: gr.update(interactive=bool(v)),
+            inputs=use_sharpen_u,
+            outputs=sharpen_gamma_input,
+        )
+        use_latent_sharp.change(
+            fn=lambda v: [gr.update(interactive=bool(v)) for _ in [latent_sharp_bg_input, latent_sharp_fg_input]],
+            inputs=use_latent_sharp,
+            outputs=[latent_sharp_bg_input, latent_sharp_fg_input],
+        )
         if examples:
             gr.Markdown("## Examples")
             gr.Examples(

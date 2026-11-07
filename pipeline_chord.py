@@ -405,6 +405,16 @@ class ChordEditPipeline(DiffusionPipeline):
         params["mask_tau_low"] = tau_lo
         params["mask_tau_high"] = tau_hi
         params["mask_sigma"] = float(max(0.0, float(params.get("mask_sigma", 2.0))))
+
+        # ---- 新增：高频增强/清晰度模块 ----
+        params["use_sharpen_u"] = bool(params.get("use_sharpen_u", False))
+        params["sharpen_gamma"] = float(max(0.0, float(params.get("sharpen_gamma", 0.5))))
+
+        params["use_latent_sharp"] = bool(params.get("use_latent_sharp", False))
+        params["latent_sharp_bg"] = float(max(0.0, float(params.get("latent_sharp_bg", 0.5))))
+        params["latent_sharp_fg"] = float(max(0.0, float(params.get("latent_sharp_fg", 0.2))))
+        # -------------------------------------
+
         return params
 
     def _prepare_noise_list(
@@ -574,6 +584,8 @@ class ChordEditPipeline(DiffusionPipeline):
         # 返回 clip(E/E_99, 0, 1)，正是所需的 E_norm ∈ [0,1]
         E_norm = self._energy_mask(
             dv_s0, tau_low=0.0, tau_high=1.0, sigma=0.0,
+            gamma=1.0,    # <--- 1.0，取消增益
+            dilate=0,     # <--- 0.0，取消膨胀
         )  # (B,1,H,W)
 
         E_mixed = floor + (1.0 - floor) * E_norm  # (B,1,H,W) ∈ [floor, 1]
@@ -609,6 +621,9 @@ class ChordEditPipeline(DiffusionPipeline):
         tau_lo = params["mask_tau_low"]
         tau_hi = params["mask_tau_high"]
         sigma = params["mask_sigma"]
+        # 新增背景清晰参数解包
+        use_sharpen_u = params.get("use_sharpen_u", False)
+        sharpen_gamma = params.get("sharpen_gamma", 0.5)
 
         x_curr = x_src
         last_mask: Optional[torch.Tensor] = None
@@ -632,6 +647,12 @@ class ChordEditPipeline(DiffusionPipeline):
                 float(t_s), params["t_delta"],adaptive_cfg=adaptive_cfg,
 
             )
+            # 路线一：控制场高频锐化 (Unsharp Masking)
+            if use_sharpen_u:
+                # 提取 u_hat 的高频（u_hat - 模糊）
+                # 注意：_gaussian_blur 支持多通道输入
+                hf_u = u_hat - self._gaussian_blur(u_hat, sigma=1.0)
+                u_hat = u_hat + sharpen_gamma * hf_u
 
             if use_local:
                 mask = self._energy_mask(u_hat, tau_lo, tau_hi, sigma)  # (B,1,H,W)
@@ -644,6 +665,7 @@ class ChordEditPipeline(DiffusionPipeline):
                     x_curr = x_curr + params["step_scale"] * u_hat
             else:
                 x_curr = x_curr + params["step_scale"] * u_hat
+
 
         if params["cleanup"]:
             t_end_idx = self._time_to_index(
@@ -660,5 +682,18 @@ class ChordEditPipeline(DiffusionPipeline):
                     x_curr = last_mask * x_prox + (1.0 - last_mask) * x_src
             else:
                 x_curr = self._pred_x0(x_curr, t_end_idx, edit_embed, noise[0])
+
+        # 路线二：潜空间高频回填 (Latent HF Compensation)
+        if params.get("use_latent_sharp", False):
+            hf_curr = x_curr - self._gaussian_blur(x_curr, sigma=1.2)
+            hf_src = x_src - self._gaussian_blur(x_src, sigma=1.2)
+
+            if use_local and last_mask is not None:
+                # 背景把源图的高频补回来，前景做适当提锐
+                x_curr = x_curr + (1.0 - last_mask) * hf_src * params["latent_sharp_bg"]
+                x_curr = x_curr + last_mask * hf_curr * params["latent_sharp_fg"]
+            else:
+                # 如果关闭了局部 Mask，就只做整体提锐
+                x_curr = x_curr + hf_curr * params["latent_sharp_fg"]
 
         return x_curr, last_mask
